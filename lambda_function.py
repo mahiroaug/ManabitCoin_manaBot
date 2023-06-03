@@ -1,45 +1,25 @@
 ### lambda_function.py
+from __future__ import print_function
 
-import openai
 import json
 import re
 import os
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
+from datetime import datetime, timedelta
+
 import boto3
 from botocore.exceptions import ClientError
 
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+import openai
 
-def get_secret():
-    secret_name = os.environ["ENV_SECRET_NAME"]
-    region_name = os.environ["ENV_REGION_NAME"]
-    
-    # Create a Secrets Manager client
-    session = boto3.session.Session()
-    client = session.client(
-        service_name='secretsmanager',
-        region_name=region_name
-    )
-    
-    try:
-        get_secret_value_response = client.get_secret_value(
-            SecretId=secret_name
-        )
-    except ClientError as e:
-        # For a list of exceptions thrown, see
-        # https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
-        raise e
-    
-    #####print("secret dir",get_secret_value_response['SecretString'])
-    # Decrypts secret using the associated KMS key.
-    secret = get_secret_value_response['SecretString']
-    
-    # Your code goes here.
-    return secret
+import hashlib
 
 
 def lambda_handler(event, context):
     print("event: ", event)
+    
+    # prevent dual launch
     if "X-Slack-Retry-Num" in event["headers"]:
         return {"statusCode": 200, "body": json.dumps({"message": "No need to resend"})}
     
@@ -57,6 +37,7 @@ def lambda_handler(event, context):
     text = re.sub(r"<@.*>", "", body["event"]["text"])
     channel = body["event"]["channel"]
     thread_ts = body["event"].get("thread_ts") or body["event"]["ts"]
+    userId = body["event"]["user"]
     print("input: ", text, "channel: ", channel, "thread:", thread_ts)
     
     
@@ -86,6 +67,8 @@ def lambda_handler(event, context):
     if match:
         manabitCoinAddress = match.group(1)
         print("manabitCoinAddress:",manabitCoinAddress)
+        
+    # prune string(address)
     pattern = r'まなびっとコインアドレス:\s(0x[0-9a-fA-F]*)'
     msg_modified = re.sub(pattern, '', msg)
     prev_messages[0]['content'] = msg_modified
@@ -121,21 +104,106 @@ def lambda_handler(event, context):
                 print("nothing start count")
                 return {"statusCode": 500}
             
-            # address error
+            # check address
             if not manabitCoinAddress:
                 print("undefined manabitCoinAddress")
                 return {"statusCode": 500}
             
+            # gettime
+            processingDate = datetime.today() + timedelta(hours=9)
+            formattedDate = processingDate.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # get users.info(get user's screen name)
+            print("userId:",userId)
+            userInfo = slack_client.users_info(user=userId)
+            
+            # create manabit report & message digest
+            manabit = userInfo["user"]["name"] + text
+            print("manabit raw text:",manabit)
+            manabitMD = hashlib.sha256(manabit.encode()).hexdigest()
+            
+            # create comment
+            comment = {
+                'date': formattedDate,
+                'stars': starcount,
+                'manabitHash': manabitMD
+            }
+            print("The your MANABIT MEMORY to be recorded in BlockChain: ",comment)
+            return
+            
+            # create web3 request
+            _data = {
+                "action": "sendManabit",
+                "param": {
+                    "to_address": manabitCoinAddress,
+                    "amount": starcount,
+                    "comment": comment
+                }
+            }
             
             
-    
-    
+            web3_request = json.dumps(_data)
+            print("WEB3---01: Payload",web3_request)
+            
+            ### lambda(web3.js) CALL START ###
+            
+            # # send Manabit to WEB3
+            web3_client = boto3.client('lambda')
+            web3_response = web3_client.invoke(
+                FunctionName='web3-manaBit',
+                InvocationType='RequestResponse',
+                Payload=web3_request
+                
+            )
+            print("WEB3---02: response",web3_response)
+            
+            ### lambda(web3.js) CALL FINISH ###
+            
+            
+            
+            # get transaction URL
+            web3_response_body = json.loads(web3_response['Payload'].read())
+            
+            
+            print("WEB3---03: response body",web3_response_body)
+            
+            
     
     
     
     
     
     return {"statusCode": 200}
+
+
+
+
+def get_secret():
+    secret_name = os.environ["ENV_SECRET_NAME"]
+    region_name = os.environ["ENV_REGION_NAME"]
+    
+    # Create a Secrets Manager client
+    session = boto3.session.Session()
+    client = session.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+    
+    try:
+        get_secret_value_response = client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        # For a list of exceptions thrown, see
+        # https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
+        raise e
+    
+    #####print("secret dir",get_secret_value_response['SecretString'])
+    # Decrypts secret using the associated KMS key.
+    secret = get_secret_value_response['SecretString']
+    
+    # Your code goes here.
+    return secret
 
 
 
