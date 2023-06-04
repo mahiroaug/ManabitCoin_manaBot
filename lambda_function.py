@@ -23,11 +23,10 @@ def lambda_handler(event, context):
     if "X-Slack-Retry-Num" in event["headers"]:
         return {"statusCode": 200, "body": json.dumps({"message": "No need to resend"})}
     
+    ### initializer ####################################
     
     # Get secrets from Secrets-Manager
     secret_dict = json.loads(get_secret())
-    
-    # initializer
     slack_client = WebClient(secret_dict["SLACK_OAUTH_TOKEN"])
     openai.organization = secret_dict["OPENAI_ORGANIZATION"]
     openai.api_key = secret_dict["OPENAI_API_KEY"]
@@ -42,13 +41,13 @@ def lambda_handler(event, context):
     
     
     
+    ### preparation ####################################
+    
     # get thread messages
     thread_messages_response = slack_client.conversations_replies(channel=channel, ts=thread_ts)
     messages = thread_messages_response["messages"]
     messages.sort(key=lambda x: float(x["ts"]))
     #print("messages:",messages)
-    
-    
     
     # get recent 30 messages in the thread
     prev_messages = [
@@ -60,20 +59,15 @@ def lambda_handler(event, context):
     ]
     print("prev_messages:",prev_messages)
     
-    # pull out manabitCoinAddress
-    msg = prev_messages[0]['content']
-    pattern = r'まなびっとコインアドレス:\n(0x[0-9a-fA-F]{40})'
-    match = re.search(pattern, msg)
-    if match:
-        manabitCoinAddress = match.group(1)
-        print("manabitCoinAddress:",manabitCoinAddress)
-        
     # prune string(address)
+    msg = prev_messages[0]['content']
     pattern = r'まなびっとコインアドレス:\s(0x[0-9a-fA-F]*)'
     msg_modified = re.sub(pattern, '', msg)
     prev_messages[0]['content'] = msg_modified
     print("prev_messages(modified):",prev_messages)
     
+    
+    ### 1st: COMPLETION (bot conversation) ####################################
     
     # make responce with system_prompt from base-model
     with open(os.environ["ENV_SYSTEM_PROMPT_BASE"], 'r') as file:
@@ -84,17 +78,18 @@ def lambda_handler(event, context):
     
     ### extra: add socring in case of first response
     if len(prev_messages) == 1:
-        with open(os.environ["ENV_SYSTEM_PROMPT_GACHA"], 'r') as file:
-            system_prompt_gacha = file.read()
-            
+        
+        ### 2nd: COMPLETION (scoring for star) ####################################
+        
         # chack manabit
-        msg = prev_messages[0]['content']
-        print("msg:",msg)
-        if "学習テーマ" in msg and \
-            "日時" in msg and \
-            "学習記録" in msg:
+        if "学習テーマ" in text and \
+            "日時" in text and \
+            "学習記録" in text:
             
             # completion manabit GACHA
+            with open(os.environ["ENV_SYSTEM_PROMPT_GACHA"], 'r') as file:
+                system_prompt_gacha = file.read()
+            
             completion_msg = make_response(prev_messages,system_prompt_gacha,slack_client, channel, thread_ts)
             starcount = completion_msg.count('★')
             print("star count:",starcount)
@@ -104,77 +99,18 @@ def lambda_handler(event, context):
                 print("nothing start count")
                 return {"statusCode": 500}
             
-            # check address
-            if not manabitCoinAddress:
-                print("undefined manabitCoinAddress")
-                return {"statusCode": 500}
+            # manabitCoin address override to User's address
+            pattern = r'まなびっとコインアドレス:\s(0x[0-9a-fA-F]{40})'
+            match = re.search(pattern, text)
+            if match:
+                manabitCoinAddress = match.group(1)
+                print("found manabitCoinAddress:",manabitCoinAddress)
             
-            # gettime
-            processingDate = datetime.today() + timedelta(hours=9)
-            formattedDate = processingDate.strftime("%Y-%m-%d %H:%M:%S")
+            ### 3rd: WEB3 manabit contract  ##############################
+            web3_result = execute_WEB3_manabit(text,manabitCoinAddress,starcount)
+            post_message(slack_client, channel, web3_result, thread_ts)
             
-            # get users.info(get user's screen name)
-            print("userId:",userId)
-            userInfo = slack_client.users_info(user=userId)
-            
-            # create manabit report & message digest
-            manabit = userInfo["user"]["name"] + text
-            print("manabit raw text:",manabit)
-            manabitMD = hashlib.sha256(manabit.encode()).hexdigest()
-            
-            # create comment
-            comment = {
-                'date': formattedDate,
-                'stars': starcount,
-                'manabitHash': manabitMD
-            }
-            print("The your MANABIT MEMORY to be recorded in BlockChain: ",comment)
-            return
-            
-            # create web3 request
-            _data = {
-                "action": "sendManabit",
-                "param": {
-                    "to_address": manabitCoinAddress,
-                    "amount": starcount,
-                    "comment": comment
-                }
-            }
-            
-            
-            web3_request = json.dumps(_data)
-            print("WEB3---01: Payload",web3_request)
-            
-            ### lambda(web3.js) CALL START ###
-            
-            # # send Manabit to WEB3
-            web3_client = boto3.client('lambda')
-            web3_response = web3_client.invoke(
-                FunctionName='web3-manaBit',
-                InvocationType='RequestResponse',
-                Payload=web3_request
-                
-            )
-            print("WEB3---02: response",web3_response)
-            
-            ### lambda(web3.js) CALL FINISH ###
-            
-            
-            
-            # get transaction URL
-            web3_response_body = json.loads(web3_response['Payload'].read())
-            
-            
-            print("WEB3---03: response body",web3_response_body)
-            
-            
-    
-    
-    
-    
-    
     return {"statusCode": 200}
-
 
 
 
@@ -251,6 +187,70 @@ def create_completion(prev_msg,system_prompt):
     except Exception as err:
         print("Error: ", err)
 
+
+def execute_WEB3_manabit(manabit,to_address,starcount):
+    # gettime
+    processingDate = datetime.today() + timedelta(hours=9)
+    formattedDate = processingDate.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # get users.info(get user's screen name)
+    ###print("userId:",userId)
+    ###userInfo = slack_client.users_info(user=userId)
+    
+    # create manabit report & message digest
+    ###manabit = userInfo["user"]["name"] + manabit
+    print("manabit raw text:",manabit)
+    manabitMD = hashlib.sha256(manabit.encode()).hexdigest()
+    
+    # create comment
+    comment = {
+        'date': formattedDate,
+        'stars': starcount,
+        'manabitHash': manabitMD
+    }
+    print("The your MANABIT MEMORY to be recorded in BlockChain: ",comment)
+    
+    # create web3 request
+    _data = {
+        "action": "sendManabit",
+        "param": {
+            "to_address": to_address,
+            "amount": starcount,
+            "comment": json.dumps(comment)
+        }
+    }
+    
+    web3_request = json.dumps(_data)
+    print("WEB3---01: Payload",web3_request)
+    ### lambda(web3.js) CALL START ###############################
+    web3_client = boto3.client('lambda')
+    web3_result = web3_client.invoke(
+        FunctionName='web3-manaBit',
+        InvocationType='RequestResponse',
+        Payload=web3_request
+        
+    )
+    ### lambda(web3.js) CALL FINISH ##############################
+    print("WEB3---02: response",web3_result)
+    web3_res_payload = json.loads(web3_result['Payload'].read())
+    print("WEB3---03: response payload",web3_res_payload)
+    print("type of web3_response_payload: ",type(web3_res_payload))
+    web3_res_body = json.loads(web3_res_payload['body'])
+    print("type of web3_response_body: ",type(web3_res_body))
+    
+    
+    # create bot response
+    msg_body = ""
+    msg_body += "ガチャの結果により、%sまなびっとコインを獲得しました～。おめでとうございます～！\n" % (starcount)
+    msg_body += "\n\n<ログ>\n"
+    msg_body += "%s\n" % (web3_res_body['receipt']['etherscan'])
+    msg_body += "TRANSACTION HASH: `%s` \n" % (web3_res_body["receipt"]["transactionHash"])
+    msg_body += "RECEIVED ADDRESS: `%s` \n" % (to_address)
+    msg_body += "GAS PRICE: `%s` \n" % (web3_res_body['receipt']['gasPriceString'])
+    msg_body += "GAS USED: `%s` \n" % (web3_res_body['receipt']['gasUsed'])
+    msg_body += "TRANSACTION FEE: `%s` \n" % (web3_res_body['receipt']['txFeeString'])
+    
+    return msg_body
 
 
 def post_message(slack_client, channel, text, thread_ts):
