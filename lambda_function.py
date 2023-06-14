@@ -168,7 +168,7 @@ def make_response(prev_msg,system_prompt,slack_client, channel, thread_ts):
 
 
 def create_completion(prev_msg,system_prompt):
-    model="gpt-3.5-turbo"
+    model="gpt-3.5-turbo-0613"
     prompt=[
         {
             "role": "system",
