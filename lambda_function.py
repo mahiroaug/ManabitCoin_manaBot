@@ -168,7 +168,7 @@ def make_response(prev_msg,system_prompt,slack_client, channel, thread_ts):
 
 
 def create_completion(prev_msg,system_prompt):
-    model="gpt-3.5-turbo-0613"
+    model=os.environ["ENV_GPT_MODEL"]
     prompt=[
         {
             "role": "system",
@@ -225,7 +225,7 @@ def execute_WEB3_manabit(manabit,to_address,starcount):
     ### lambda(web3.js) CALL START ###############################
     web3_client = boto3.client('lambda')
     web3_result = web3_client.invoke(
-        FunctionName='web3-manaBit',
+        FunctionName=os.environ["ENV_LAMBDA_INVOKE"],
         InvocationType='RequestResponse',
         Payload=web3_request
         
