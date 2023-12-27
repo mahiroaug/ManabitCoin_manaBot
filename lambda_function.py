@@ -73,7 +73,8 @@ def lambda_handler(event, context):
     with open(os.environ["ENV_SYSTEM_PROMPT_BASE"], 'r') as file:
         system_prompt = file.read()
     # completion response
-    completion_msg = make_response(prev_messages,system_prompt,slack_client, channel, thread_ts)
+    completion_msg = make_response(prev_messages,system_prompt)
+    post_message(slack_client, channel, completion_msg, thread_ts)
     
     
     ### extra: add socring in case of first response
@@ -81,7 +82,7 @@ def lambda_handler(event, context):
         
         ### 2nd: COMPLETION (scoring for star) ####################################
         
-        # chack manabit
+        # check manabit
         if "学習テーマ" in text and \
             "日時" in text and \
             "学習記録" in text:
@@ -89,8 +90,9 @@ def lambda_handler(event, context):
             # completion manabit GACHA
             with open(os.environ["ENV_SYSTEM_PROMPT_GACHA"], 'r') as file:
                 system_prompt_gacha = file.read()
+            completion_msg= make_response(prev_messages,system_prompt_gacha)
+            post_message(slack_client, channel, completion_msg, thread_ts)
             
-            completion_msg = make_response(prev_messages,system_prompt_gacha,slack_client, channel, thread_ts)
             starcount = completion_msg.count('★')
             print("star count:",starcount)
             
@@ -106,9 +108,11 @@ def lambda_handler(event, context):
                 manabitCoinAddress = match.group(1)
                 print("found manabitCoinAddress:",manabitCoinAddress)
             
-            ### 3rd: WEB3 manabit contract  ##############################
-            web3_result = execute_WEB3_manabit(text,manabitCoinAddress,starcount)
-            post_message(slack_client, channel, web3_result, thread_ts)
+        ### 3rd: WEB3 manabit contract  ##############################
+            
+        # send manabit
+        web3_result = execute_WEB3_manabit(text,manabitCoinAddress,starcount)
+        post_message(slack_client, channel, web3_result, thread_ts)
             
     return {"statusCode": 200}
 
@@ -134,16 +138,13 @@ def get_secret():
         # https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
         raise e
     
-    #####print("secret dir",get_secret_value_response['SecretString'])
-    # Decrypts secret using the associated KMS key.
     secret = get_secret_value_response['SecretString']
     
     # Your code goes here.
     return secret
 
 
-
-def make_response(prev_msg,system_prompt,slack_client, channel, thread_ts):
+def make_response(prev_msg,system_prompt):
     
     # create completion
     openai_response = create_completion(prev_msg,system_prompt)
@@ -156,15 +157,10 @@ def make_response(prev_msg,system_prompt,slack_client, channel, thread_ts):
     cost = tkn_tot * 0.002 / 1000
     msg_head = "\n `info: prompt + completion = %s + %s = %s tokens(%.4f USD)` " % (tkn_pro,tkn_com,tkn_tot,cost)
     res_text = openai_response["choices"][0]["message"]["content"]
-    ##answer = msg_head + res_text
     answer = res_text + msg_head
     print("answer:",answer)
-    
-    # post_message
-    post_message(slack_client, channel, answer, thread_ts)
-    
-    return res_text
 
+    return res_text
 
 
 def create_completion(prev_msg,system_prompt):
@@ -192,10 +188,6 @@ def execute_WEB3_manabit(manabit,to_address,starcount):
     # gettime
     processingDate = datetime.today() + timedelta(hours=9)
     formattedDate = processingDate.strftime("%Y-%m-%d %H:%M:%S")
-    
-    # get users.info(get user's screen name)
-    ###print("userId:",userId)
-    ###userInfo = slack_client.users_info(user=userId)
     
     # create manabit report & message digest
     ###manabit = userInfo["user"]["name"] + manabit
@@ -241,27 +233,122 @@ def execute_WEB3_manabit(manabit,to_address,starcount):
     
     # create bot response
     msg_body = ""
-    msg_body += "ガチャの結果により、%sまなびっとコインを獲得しました～。おめでとうございます～！\n" % (starcount)
-    msg_body += "\n\n<ログ>\n"
-    msg_body += "%s\n" % (web3_res_body['receipt']['etherscan'])
-    msg_body += "TRANSACTION HASH: `%s` \n" % (web3_res_body["receipt"]["transactionHash"])
-    msg_body += "RECEIVED ADDRESS: `%s` \n" % (to_address)
-    msg_body += "GAS PRICE: `%s` \n" % (web3_res_body['receipt']['gasPriceString'])
-    msg_body += "GAS USED: `%s` \n" % (web3_res_body['receipt']['gasUsed'])
-    msg_body += "TRANSACTION FEE: `%s` \n" % (web3_res_body['receipt']['txFeeString'])
+    msg_log = ""
+    msg_hash = ""
+    msg_address = ""
+    msg_gas = ""
+    msg_gas_used = ""
+    msg_gas_fee = ""
     
-    return msg_body
+    msg_body += "ガチャの結果により、%sまなびっとコインを獲得しました～。おめでとうございます～！\n" % (starcount)
+    msg_log += "%s\n" % (web3_res_body['receipt']['etherscan'])
+    msg_hash += "`%s`" % (web3_res_body["receipt"]["transactionHash"])
+    msg_address += "`%s`" % (to_address)
+    msg_gas += "`%s`" % (web3_res_body['receipt']['gasPriceString'])
+    msg_gas_used += "`%s`" % (web3_res_body['receipt']['gasUsed'])
+    msg_gas_fee += "`%s`" % (web3_res_body['receipt']['txFeeString'])
+    
+    attachments = []
+    attachments.append(make_attachment(
+        pretext='ガチャ結果をお伝えします〜！',
+        color='#FFFF00',
+        title='Manabit result',
+        text='振込情報を羅列します〜！',
+        fields=[
+            {
+                'title': 'MNBC ver holeskyをお届けします〜',
+                'value': msg_body,
+                # 'short': True
+            },
+            {
+                'title': '<ログ>',
+                'value': msg_log,
+                # 'short': True
+            },
+            {
+                'title': 'TRANSACTION HASH',
+                'value': msg_hash,
+                # 'short': True
+            },
+            {
+                'title': 'RECEIVED ADDRESS',
+                'value': msg_address,
+                # 'short': True
+            },
+            {
+                'title': 'GAS PRICE',
+                'value': msg_gas,
+                'short': True
+            },
+            {
+                'title': 'GAS USED',
+                'value': msg_gas_used,
+                'short': True
+            },
+            {
+                'title': 'TRANSACTION FEE',
+                'value': msg_gas_fee,
+                # 'short': True
+            }
+        ],
+        footer='Powerd by web3 group'
+    )
+    )
+    
+    return attachments
 
 
 def post_message(slack_client, channel, text, thread_ts):
     try:
-        response = slack_client.chat_postMessage(
-            channel=channel,
-            text=text,
-            as_user=True,
-            thread_ts=thread_ts,
-            reply_broadcast=False
-        )
-        print("slackResponse: ", response)
+        print(type(text))
+        if type(text) is list:
+            response = slack_client.chat_postMessage(
+                channel=channel,
+                attachments=text,
+                as_user=True,
+                thread_ts=thread_ts,
+                reply_broadcast=False
+            )
+            print("slackResponse: ", response)
+        else:
+            response = slack_client.chat_postMessage(
+                channel=channel,
+                text=text,
+                as_user=True,
+                thread_ts=thread_ts,
+                reply_broadcast=False
+            )
+            print("slackResponse: ", response)
     except SlackApiError as e:
         print("Error posting message: {}".format(e))
+
+
+def make_attachment(
+    pretext=None,
+    color='#FFFFFF',
+    author_name=None,
+    author_link=None,
+    author_icon=None,
+    title=None,
+    title_link=None,
+    text=None,
+    fields=None,
+    footer=None,
+    footer_icon=None,
+    ts=None
+):
+    attachments = {
+            'color': color,
+            'pretext': pretext,
+            'author_name': author_name,
+            'author_link': author_link,
+            'author_icon': author_icon,
+            'title': title,
+            'title_link': title_link,
+            'text': text,
+            'fields': fields,
+            'footer': footer,
+            'footer_icon': footer_icon,
+            'ts': ts
+    }
+    return attachments
